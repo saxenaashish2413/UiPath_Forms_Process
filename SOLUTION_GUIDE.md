@@ -40,7 +40,7 @@ Operator/robot ExecuteDeployment.xaml ─► Requests\Execute_Request
 
 Main design decisions:
 
-* **The Bot ID is a business identifier.** It is looked up in `Config\BotMapping.json`, which names the process, package, folders, assets, queues and access (UiPath) or the solution and flows (Power Automate). It is never treated as an Orchestrator key. Aliases are supported (for example `INV-BOT` resolves to `BOT-1001`).
+* **The Bot ID is a business identifier.** It is looked up in `Config\BotMapping.json`, which names the process, package, folders, assets, queues and access (UiPath) or the solution and flows (Power Automate). It is never treated as an Orchestrator key. Aliases are supported (for example `INV-BOT` resolves to `BOT-1001`). A Bot ID that is **not** in the mapping is looked up in **Dev** (section 3, "Bot IDs found in Dev"), so registering every bot is optional.
 * **Submitting never changes Prod.** UAT to Prod always needs an `Approved` record from a listed approver who is not the requester, plus a successful Dev to UAT result for the same Bot ID and version. Both are checked when the request is submitted and checked again by `ExecuteDeployment.xaml` right before deploying.
 * **Every step is idempotent.** Each object is read first and changed only when it differs. A package already in the target feed is not uploaded again, a process already on the version is left alone, an existing queue is never recreated, access roles are merged, and a version already recorded as `RES|...|OK` is not deployed again. A failed run can be re-run and resumes.
 * **Values are kept apart.** The form shows the **Dev value** (retrieved), the **target state** (retrieved from UAT or Prod), the **proposed value** (editable, only in edit mode) and, after deployment, the **saved** status per object. The request stores Dev values from the robot's own fetch, never from the form, so edits are limited to the editable columns.
@@ -86,6 +86,20 @@ Credential assets are shown as "Configured in Orchestrator (hidden)". The form n
 
 Rules checked when the file is loaded: Bot IDs and aliases are unique (ignoring case), each bot has the section for its tool, and each UiPath bot has a folder for Dev, UAT and Prod.
 
+### Bot IDs found in Dev (no mapping entry needed)
+
+When the Bot ID is not in `BotMapping.json` and `discovery.enabled` is true for the selected tool, Fetch Details searches **Dev** for it and fills in the rest from what Dev returns. A mapping entry always wins, so use one when you need aliases, different folder names per environment, specific access, or to choose between several matches.
+
+* **UiPath** (`Providers\UiPath\Discover_Bot_In_Dev.xaml`). It lists the Dev folders the API account can see (or only `searchFolders` and their subfolders), and in each one looks for a process whose **name** or **package ID** equals the Bot ID, or whose **description** contains it as a whole word (for example `Invoice bot [BOT-3001]`). The match gives:
+  * process name and package ID, from the Dev process;
+  * folders: the Dev folder, and the same path in UAT and Prod unless `folderMap` maps a prefix (for example `{"Dev-Finance": "Finance"}`);
+  * assets and queues: every asset and queue in that Dev folder, marked as required, so New requests propose creating the missing ones (editors can still change the action to Skip);
+  * credential assets: the approved secret source is taken from `secretStaging` (by default `Shared/SecretStaging`, asset `STAGE_<asset>_<UAT|Prod>`). No value is read from Dev;
+  * access: none is assumed; Dev folder access is shown for information.
+* **Power Automate** (`Providers\PowerAutomate\PA_Discover_Solution_In_Dev.xaml`). It looks for an **unmanaged** solution in the Dev Dataverse environment whose unique name equals the Bot ID or whose description contains it. Its cloud flows are then read from Dev as usual.
+* Exactly one match is required. With none, the form says the Bot ID was not found in the mapping or in Dev. With several, the form names each match (folder and process, or solution) and asks for a mapping entry. Nothing is guessed.
+* The form message says when details came from discovery (for example "Not in the Bot ID mapping: found in Dev as process HR_Onboarding in folder HR/Onboarding."). `ExecuteDeployment` repeats the search before deploying, so it always works from Dev's current state.
+
 ### Settings.json
 
 | Key | Meaning |
@@ -93,7 +107,9 @@ Rules checked when the file is loaded: Bot IDs and aliases are unique (ignoring 
 | `botIdPattern` | Regex the Bot ID must match (also enforced in the form). |
 | `http.timeoutSeconds`, `retryCount`, `retryDelaySeconds` | Passed to every HTTP Request activity: Timeout (for the call including retries), Retry count (retries after the first attempt) and Initial delay. The activity retries only 408, 429, 500, 502, 503, 504 and connection errors, with exponential back-off, honouring `Retry-After`. 401 re-authenticates once. 403 is never retried. |
 | `http.pageSize`, `maxPages` | OData paging (`$top`/`$skip` for Orchestrator, `@odata.nextLink` for Dataverse). |
-| `uipath.environments.<Dev/UAT/Prod>` | `orchestratorUrl`, `tenantName` (X-UIPATH-TenantName header), `tokenUrl` (`<orchestrator>/identity/connect/token`), `credentialAsset` and `credentialFolder` (the Orchestrator Credential asset holding the external application's client ID and secret), `scope`, and optional `feedId` (folder feed GUID). |
+| `uipath.environments.<Dev/UAT/Prod>` | `orchestratorUrl`; `tenantName` (sent as `tenancyName` at sign-in and as the X-UIPATH-TenantName header); `authMode`; `tokenUrl`; `credentialAsset` and `credentialFolder`; `scope`; optional `feedId` (folder feed GUID). **`authMode: "UsernamePassword"`** (template default, for standalone Orchestrator): signs in with `POST <orchestrator>/api/Account/Authenticate` (`tokenUrl`, filled in automatically when empty) using `tenancyName`, `usernameOrEmailAddress` and `password`; the Credential asset holds the Orchestrator **username** and **password**; the token is reused for `tokenLifetimeMinutes` (default 30) and renewed on HTTP 401; `scope` is not used. **`authMode: "ClientCredentials"`**: external application, `tokenUrl` `<orchestrator>/identity/connect/token`, Credential asset = client ID and secret, `scope` required. Each environment can use a different mode. |
+| `uipath.discovery` | `enabled`, `matchOn` (any of `Name`, `ProcessKey`, `Description`), `searchFolders` (empty = all folders), `folderMap.UAT` / `folderMap.Prod` (Dev path prefix to target prefix), `includeFolderAssets`, `includeFolderQueues`, `secretStaging` (`folderPath`, `assetNamePattern` with `{asset}` and `{env}`). See "Bot IDs found in Dev". |
+| `powerAutomate.discovery` | `enabled`, `matchOn` (any of `uniquename`, `friendlyname`, `description`). |
 | `powerAutomate` | Entra `authorityUrl` and `tenantId`, `credentialAsset` (app registration client ID and secret), Dataverse `environmentUrl` per environment, async import polling, and `solutionArtifactStore` (where managed exports are kept with their SHA-256). |
 | `governance` | Orchestrator environment and folder that hold the three governance queues, and their names. |
 | `deploymentPaths` | `Dev to UAT` (no approval, `autoExecuteAfterSubmit: true`) and `UAT to Prod` (`requiresApproval`, `requiresSuccessfulPreviousStage`, `previousStage: "Dev to UAT"`, `autoExecuteAfterSubmit: false`). A path into Prod without approval is rejected at load time. |
@@ -128,7 +144,7 @@ Anything that looks like a credential is masked before it is written. The robot 
 
 ## 5. UiPath provider (Orchestrator 2025.10 standalone)
 
-**Fetch** (`Fetch_Bot_Configuration.xaml`). For Dev, UAT and Prod it reads the mapped folder, the process (release) and the package versions in the feed. For **New**, it also reads Dev assets, queues and folder access, plus their state in the target. Credential fields are never selected. A UAT or Prod read failure (for example HTTP 403) becomes a per-environment warning. A Dev failure makes the result an error.
+**Fetch** (`Fetch_Bot_Configuration.xaml`). The bot comes from the mapping or, when it is not mapped, from `Discover_Bot_In_Dev.xaml` (section 3). For Dev, UAT and Prod it reads the mapped folder, the process (release) and the package versions in the feed. For **New**, it also reads Dev assets, queues and folder access, plus their state in the target. Credential fields are never selected. A UAT or Prod read failure (for example HTTP 403) becomes a per-environment warning. A Dev failure makes the result an error.
 
 **Deploy** (`Execute_UiPath_Deployment.xaml`, called by `Deploy_Dev_To_UAT` / `Deploy_UAT_To_Prod`):
 
@@ -157,7 +173,7 @@ Anything that looks like a credential is masked before it is written. The robot 
 
 The "Power Automate components" are the provider workflows in `Providers\PowerAutomate\`. They work through the Dataverse Web API, which is how solutions (and the cloud flows inside them) are exported and imported. No flow has to be built in Power Automate.
 
-* **Fetch** (`PA_Fetch_Bot_Configuration`). It reads the organization name, the mapped solution's version and managed state in Dev, UAT and Prod, and the cloud flows (solution components of type 29, workflows with category 5) of the Dev solution. Only what the API returns is shown; no metadata is made up.
+* **Fetch** (`PA_Fetch_Bot_Configuration`). The solution comes from the mapping or, when the Bot ID is not mapped, from `PA_Discover_Solution_In_Dev` (section 3). It reads the organization name, the solution's version and managed state in Dev, UAT and Prod, and the cloud flows (solution components of type 29, workflows with category 5) of the Dev solution. Only what the API returns is shown; no metadata is made up.
 * **Dev to UAT** (`PA_Deploy_Solution`). It checks that the requested version is the current Dev version, exports the solution as **managed** (`ExportSolution`), and stores the file plus its SHA-256 in `Data\SolutionArtifacts`. Then it imports with `ImportSolutionAsync` (`OverwriteUnmanagedCustomizations: false`, `PublishWorkflows: true`), polls `asyncoperations(<id>)` until it completes, and reads the target version back.
 * **UAT to Prod**. It imports the **same stored file** UAT got. The SHA-256 must match and the same version must be installed in UAT. Nothing is exported again for Prod.
 * **Connection references and environment variables** are not set by this solution (`ComponentParameters` is empty). Configure the connections in UAT and Prod before the first import of a solution that uses them. The form shows this warning for Power Automate New requests.
@@ -165,10 +181,10 @@ The "Power Automate components" are the provider workflows in `Providers\PowerAu
 ## 7. Security
 
 * **Secrets**:
-  * Orchestrator external-application secrets, the Entra app secret and the staged credential values live only in Orchestrator Credential assets.
+  * The Orchestrator API usernames and passwords (or external-application secrets), the Entra app secret and the staged credential values live only in Orchestrator Credential assets.
   * They are read at run time with Get Credential.
   * They are never in XAML, settings, the form, queue items, logs or audit files.
-  * Access tokens are cached only in memory for the run (`in_Session`) and never logged.
+  * Access tokens are cached only in memory for the run (`in_Session`) and never logged. The sign-in request (which carries the password) is sent once per environment per token lifetime, and raw request saving is off on the HTTP Request activity.
 * `project.json` `excludedLoggedData` hides arguments and variables matching `*password*`, `*secret*`, `*token*` and `*credential*` from robot execution logs.
 * Asset reads use `$select` without credential fields. A non-credential asset whose name matches a sensitive pattern is masked in the form and cannot be migrated by value.
 * Errors are logged as method, path, status, Orchestrator error code and correlation ID, never request or response bodies. Anything credential-shaped is masked.
@@ -187,7 +203,7 @@ The "Power Automate components" are the provider workflows in `Providers\PowerAu
 | Robot | 25.10, Windows. Attended for Main and ApproveRequest; attended or unattended for ExecuteDeployment. |
 | Orchestrator | 2025.10.2 standalone, separate Dev, UAT and Prod (or tenants), reachable over HTTPS from the robot |
 | Packages | UiPath.System.Activities 26.2.7, UiPath.Form.Activities 25.10.0, UiPath.WebAPI.Activities 2.4.0 (HTTP Request), UiPath.Excel.Activities 3.4.1 (pinned in project.json) |
-| Orchestrator external applications | One confidential application per Orchestrator with application scopes (section 11) |
+| Orchestrator API sign-in | Per Orchestrator: a user that signs in with tenant, username and password (default), or an external application (section 11) |
 | Governance folder | `Shared/AutomationManagement` on the Dev Orchestrator, with the three queues and the credential assets |
 | Secret staging folder | For example `Shared/SecretStaging`, readable only by the deployment robot, holding staged Credential assets per target environment |
 | Power Automate (optional) | Entra app registration with a client secret, and a Dataverse **application user** in Dev, UAT and Prod with a security role that can export and import solutions |
@@ -195,12 +211,12 @@ The "Power Automate components" are the provider workflows in `Providers\PowerAu
 ## 9. Setup steps
 
 1. **Unzip** and open `RPA_Automation_Management\project.json` in Studio 25.10. Let it restore the three packages.
-2. **Orchestrator external applications** (each Orchestrator: Admin > External Applications > Add, confidential, application scopes as in section 11). Copy each client ID and secret.
-3. **Credential assets** in the governance folder of the Dev Orchestrator (Username = client ID, Password = secret): `AM_Orchestrator_Dev_App`, `AM_Orchestrator_UAT_App`, `AM_Orchestrator_Prod_App`, and `AM_PowerPlatform_App` if you use Power Automate. Give the robot account View access to them and to nothing else it does not need.
+2. **Orchestrator API sign-in**, in each Orchestrator (Dev, UAT, Prod). With `authMode: "UsernamePassword"` (the template default), use an Orchestrator user that can sign in with username and password in the tenant named in `tenantName`. A dedicated API user with only the roles in section 11 is safer than a personal admin account, because whatever that user may do, the robot may do. With `authMode: "ClientCredentials"`, create an external application instead (Admin > External Applications > Add, confidential, scopes as in section 11) and copy its client ID and secret.
+3. **Credential assets** in the governance folder of the Dev Orchestrator (Username = Orchestrator username and Password = its password; or client ID and secret for ClientCredentials): `AM_Orchestrator_Dev_App`, `AM_Orchestrator_UAT_App`, `AM_Orchestrator_Prod_App`, and `AM_PowerPlatform_App` if you use Power Automate. Give the robot account View access to them and to nothing else it does not need.
 4. **Governance queues** `AM_Requests`, `AM_Approvals` and `AM_DeploymentResults` in the same folder, with **Enforce unique reference** on.
-5. **Secret staging** (only for Credential assets that must be created in UAT or Prod). Create the staged Credential assets named in the mapping in a restricted folder, filled in by the credential owner.
+5. **Secret staging** (only for Credential assets that must be created in UAT or Prod). Create the staged Credential assets in a restricted folder, filled in by the credential owner: the names in the mapping, or for bots found in Dev the names from `uipath.discovery.secretStaging` (default `STAGE_<asset>_UAT` and `STAGE_<asset>_Prod` in `Shared/SecretStaging`).
 6. **Edit `Config\Settings.json`**: replace every `<...>` (hosts, tenant ID, Dataverse URLs, `DOMAIN\group` names). Set `feedId` only if a target folder uses its own feed. Review approvers, role mappings and allowed access levels.
-7. **Edit `Config\BotMapping.json`**: replace the two template bots with your real Bot IDs, processes, folders and objects.
+7. **`Config\BotMapping.json` is optional.** With discovery on (the default), Fetch Details finds a Bot ID in Dev by process name, package ID or the Bot ID in the process description (UiPath), or by solution unique name or description (Power Automate). Put the Bot ID in the Dev process or solution description, for example `[BOT-3001]`, if it is not already the name. Add a mapping entry only for bots that need aliases, different folder names in UAT or Prod, specific access, or that match more than one process. Remove the two template bots or replace them with real ones.
 8. **Power Automate**: register the Entra app and create the Dataverse application user in each environment with the required role. Create the connections that the solutions' connection references need in UAT and Prod.
 9. Publish the project to the governance Orchestrator. Create processes for the entry points: `Main` (requesters), `ApproveRequest` (approvers) and `ExecuteDeployment` (deployment robot). Point requesters, approvers and the deployment robot at them.
 10. Do the first-run checks in section 13 **in Dev and UAT only** before allowing any Prod path.
@@ -211,8 +227,11 @@ The "Power Automate components" are the provider workflows in `Providers\PowerAu
 
 | Call | Used by | Source |
 |---|---|---|
-| `POST <orchestrator>/identity/connect/token` (client_credentials) | Get_Access_Token | Guide |
+| `POST <orchestrator>/api/Account/Authenticate` (`tenancyName`, `usernameOrEmailAddress`, `password`; token in `result`) | Get_Access_Token (UsernamePassword) | Guide (on-premises Orchestrator) |
+| `POST <orchestrator>/identity/connect/token` (client_credentials) | Get_Access_Token (ClientCredentials) | Guide |
 | `GET odata/Folders?$filter=FullyQualifiedName eq '...'` | Get_Folder | Guide |
+| `GET odata/Folders?$select=Id,DisplayName,FullyQualifiedName` (paged) | Discover_Bot_In_Dev | Guide |
+| `GET odata/Releases?$filter=Name eq '<id>' or ProcessKey eq '<id>' or contains(Description,'<id>')` (per Dev folder) | Discover_Bot_In_Dev | Guide (OData `$filter`) |
 | `GET odata/Releases?$filter=Name eq '...'`, `GET odata/Releases(<id>)` | Get_Process_Details, verify | Guide |
 | `POST odata/Releases` | Deploy_Package (New: create process) | Swagger |
 | `POST odata/Releases(<id>)/UiPath.Server.Configuration.OData.UpdateToSpecificPackageVersion` | Deploy_Package | Swagger |
@@ -229,6 +248,7 @@ The "Power Automate components" are the provider workflows in `Providers\PowerAu
 | `GET odata/QueueItems?$filter=QueueDefinitionId eq .. and Reference eq '..'` | Find_Queue_Item | Guide |
 | `POST odata/Queues/UiPathODataSvc.AddQueueItem` | Add_Queue_Item | Swagger |
 | `POST https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token` (scope `<env url>/.default`) | Get_Access_Token (PA) | Guide (Microsoft) |
+| `GET solutions?$filter=ismanaged eq false and (uniquename eq '<id>' or contains(description,'<id>'))` | PA_Discover_Solution_In_Dev | Guide (Microsoft) |
 | `GET RetrieveCurrentOrganization(...)`, `GET solutions`, `GET solutioncomponents`, `GET workflows` | PA_Get_Solution_Details, PA_Get_Flows | Guide (Microsoft) |
 | `POST ExportSolution`, `POST ImportSolutionAsync`, `GET asyncoperations(<id>)` | PA_Deploy_Solution | Guide (Microsoft) |
 
@@ -254,8 +274,8 @@ Every call above is made by the UiPath **HTTP Request** activity (UiPath.WebAPI.
 | UAT | `OR.Folders OR.Execution OR.Assets OR.Queues OR.Users` | Upload packages, create and update processes, assets, queues and folder role assignments |
 | Prod | same as UAT | same, but only through an approved request |
 
-- [ ] External application per Orchestrator, confidential, with the scopes above (reduce them if your 2025.10.2 offers finer scopes that still cover the calls in section 10).
-- [ ] Confirm the app can see the mapped folders (a folder it cannot see is reported as "does not exist or is not visible").
+- [ ] UsernamePassword: an Orchestrator user per environment whose roles cover the same operations as the scopes above (Dev: view folders, processes, packages, assets, users; edit queues and queue items in the governance folder. UAT/Prod: create and edit packages, processes, assets, queues and folder role assignments in the bots' folders). ClientCredentials: an external application per Orchestrator, confidential, with the scopes above (reduce them if your 2025.10.2 offers finer scopes that still cover the calls in section 10).
+- [ ] Confirm the app can see the mapped folders (a folder it cannot see is reported as "does not exist or is not visible"). For Dev discovery it must see the Dev folders that hold your bots; folders it cannot search are named in the form message.
 - [ ] Robot account: View on the four `AM_*_App` credential assets and the staging credential assets, plus queue item access in the governance folder. Nothing in the Finance/... folders is needed for the robot itself.
 - [ ] Governance queues created with unique references.
 - [ ] Requesters, editors and approvers listed in `authorization` (Windows accounts or groups as the robot sees them).
@@ -268,10 +288,10 @@ All tests ran in a Linux build container with no access to your systems. **None 
 
 | What | How | Result | Evidence |
 |---|---|---|---|
-| XAML load and expression compile | Every XAML loaded with the real UiPath.System.Activities 26.2.7, UiPath.Form.Activities 25.10.0, UiPath.WebAPI.Activities 2.4.0 (HTTP Request), UiPath.Platform 25.10 and UiPath.Workflow assemblies; `ActivityValidationServices` compiled every VB expression. Two Studio-internal assemblies (Activities.Contracts, CodedWorkflows) were empty stubs. | 38 of 38 loaded, 0 errors | `verification/xaml-validation.log` |
+| XAML load and expression compile | Every XAML loaded with the real UiPath.System.Activities 26.2.7, UiPath.Form.Activities 25.10.0, UiPath.WebAPI.Activities 2.4.0 (HTTP Request), UiPath.Platform 25.10 and UiPath.Workflow assemblies; `ActivityValidationServices` compiled every VB expression. Two Studio-internal assemblies (Activities.Contracts, CodedWorkflows) were empty stubs. | 40 of 40 loaded, 0 errors | `verification/xaml-validation.log` |
 | .uiform file | Deserialised with UiPath.Studio.Forms.Runtime 25.10.0's form serializer | OK, 129 components, FormId matches the activities | same log |
 | Form behaviour | Chromium with the form.io bundle from UiPath.Studio.Forms.Runtime 25.10.0. Covers section visibility per tool and type, events, field setting, stale details, buttons, grid editing, validation messages and secret masking. | 57 of 57 | `verification/form-browser-tests.log`, screenshots |
-| Workflow logic end to end | The same expressions and Invoke Code bodies compiled as VB.NET (Option Strict On). The HTTP Request activity is emulated from its decompiled 2.4.0 logic: retry handler, continue on error, body types and response handling. Run against a **mock** Orchestrator (Dev/UAT/Prod), Identity Server, Entra ID and Dataverse with fault injection | 80 of 80 | `verification/workflow-tests.log` |
+| Workflow logic end to end | The same expressions and Invoke Code bodies compiled as VB.NET (Option Strict On). The HTTP Request activity is emulated from its decompiled 2.4.0 logic: retry handler, continue on error, body types and response handling. Run against a **mock** Orchestrator (Dev/UAT/Prod), Identity Server, Entra ID and Dataverse with fault injection | 93 of 93 | `verification/workflow-tests.log` |
 
 Workflow test areas:
 
@@ -279,6 +299,7 @@ Workflow test areas:
 |---|---|---|
 | Configuration | 3 | Missing files, Prod path without approval, duplicate Bot ID |
 | Bot IDs | 4 | Unknown ID, alias, tool mismatch, Cancel |
+| Dev discovery | 11 | UiPath Bot ID found in Dev by process description, versions, Dev assets and queues with staged credential, Dev to UAT deployment of the discovered bot, mapping wins, two matches named, whole-word match only, discovery off, Power Automate solution found by description, bad `matchOn` rejected |
 | UiPath New Dev to UAT | 20 | Fetch values, masking, edit mode, validation, submit, package, process, assets (including credential from staging), queue, access merge, Prod untouched, governance records, audit |
 | Idempotency | 3 | Re-execute changes nothing, duplicate submit refused, objects then show Keep / No change |
 | UiPath Enhancement UAT to Prod | 12 | Package-only details, version from UAT, waits for approval, blocked without approval, self-approval refused, wrong approver refused, approved deploy from the UAT feed, no config changes, decided once |
@@ -286,7 +307,7 @@ Workflow test areas:
 | Validation rules | 8 | Disallowed role, duplicate create, required skip, invalid not submitted, non-editor edits, credential without secret source, stale details, Prod version rule |
 | Partial failure | 4 | Persistent 500 on one object, retries, FAILED evidence, resume |
 | Rollback | 2 | Wrong version after update triggers restore and failure, no OK evidence |
-| API errors | 5 | 503 retry, 401 re-auth, 403 as an environment warning, rejected secret, governance queue down |
+| API errors and sign-in | 7 | 503 retry, 401 re-auth, 403 as an environment warning, rejected password, governance queue down, ClientCredentials mode, default sign-in URL |
 | Power Automate | 10 | Fetch, managed export, async import poll, Entra scope, artifact and hash, Prod waits for approval, tampered file refused, same file to Prod, import failure, version rule |
 | Secrets | 4 | No secret or token in form data, logs, audit or queue items; every call authenticated; no credential fields selected |
 
@@ -301,7 +322,7 @@ Run these in order, in **Dev and UAT only**, and keep the logs.
 
 1. **Open in Studio**. The project should open and restore without errors, including UiPath.WebAPI.Activities 2.4.0 for the HTTP Request activity (it is already in your local package cache). Run *Analyze Project* and *Validate*. (Validated here only with the runtime assemblies, not inside Studio.)
 2. **Form designer**. Open `Form\AutomationManagement.uiform` and check it renders. Confirm the Show Form, Get/Set Form Fields and Form Trigger activities in `Form\Automation_Form_Controller.xaml` show the form as linked (FormId `8f1c2a7e-5b3d-4e69-a0c4-7d2e9b6f1a35`).
-3. **Fetch only**. Run `Main` with a real Bot ID and use Fetch Details for Enhancement Dev to UAT, then New Dev to UAT. Compare what the form shows with Orchestrator. Check the robot log contains no secrets.
+3. **Fetch only**. Run `Main` with a real Bot ID and use Fetch Details for Enhancement Dev to UAT, then New Dev to UAT. Do it once for a Bot ID that is **not** in `BotMapping.json`, to check that Dev discovery finds the right process (or solution) and folder. Compare what the form shows with Orchestrator. Check the robot log contains no secrets.
 4. **Grid editing in the real form host**. In edit mode, change an asset value, a queue setting and an access level, then click Validate. Check that the summary shows your changes. This was tested with form.io in a browser, not with the UiPath form host.
 5. **Swagger check**. Open `https://<uat-orchestrator>/swagger` and confirm the request bodies of the Swagger-only calls in section 10 (UploadPackage, POST Releases, UpdateToSpecificPackageVersion, Assets PUT, QueueDefinitions POST/PUT, AddQueueItem).
 6. **Dev to UAT with a test bot**. Submit a New request for a throwaway process. Check the package, process, assets (including one credential from staging), queue and access in UAT, then the `AM_Requests` and `AM_DeploymentResults` items and the audit file. Run `ExecuteDeployment` again with the same reference and expect AlreadyDeployed with no changes.
@@ -312,6 +333,8 @@ Run these in order, in **Dev and UAT only**, and keep the logs.
 ## 14. Known limits and unverified items
 
 * **Swagger-only endpoints** (section 10). The bodies were built from the Orchestrator API model (`UploadPackage` multipart field `file`; `UpdateToSpecificPackageVersion` body `{"packageVersion": ...}`; `POST Releases` with Name, ProcessKey, ProcessVersion and Description only, so a package with several entry points gets Orchestrator's default entry point; `AddQueueItem {itemData: {...}}`). They were not called against a real 2025.10.2 instance.
+* **Username and password sign-in**. `POST api/Account/Authenticate` is the documented sign-in for on-premises Orchestrator, and was only run against the mock. It works for users who sign in with a local Orchestrator username and password; users who only sign in through Windows or an external identity provider cannot use it, and an administrator can turn local sign-in off. In that case use `authMode: "ClientCredentials"`. The token lifetime is set by your Orchestrator; `tokenLifetimeMinutes` should not be longer, and a 401 renews the token anyway.
+* **Dev discovery filter**. `contains(Description,'...')` and `ProcessKey eq '...'` in the Releases `$filter`, and `contains(description,'...')` on Dataverse solutions, are standard OData but were only run against the mock. If your Orchestrator rejects a field, remove it from `uipath.discovery.matchOn`. With many Dev folders, set `searchFolders` so discovery makes fewer calls (one call per folder).
 * **`feedId`**. The query parameter for folder feeds on GetProcessVersions, UploadPackage and DownloadPackage is not confirmed. Leave `feedId` empty for tenant feeds.
 * **AddQueueItem 409**. The duplicate-reference status code on a unique-reference queue is assumed to be 409. The workflow also checks for an existing reference before adding, so a different status still prevents duplicates. It would just show as an error.
 * **Secret-type assets** (Orchestrator "Secret" value type) are not migrated by value. They must be set in Orchestrator. Credential assets are supported through staging.
