@@ -46,6 +46,12 @@ Main design decisions:
 * **Values are kept apart.** The form shows the **Dev value** (retrieved), the **target state** (retrieved from UAT or Prod), the **proposed value** (editable, only in edit mode) and, after deployment, the **saved** status per object. The request stores Dev values from the robot's own fetch, never from the form, so edits are limited to the editable columns.
 * **The two providers do not share API logic.** UiPath uses `Providers\UiPath\*`. Power Automate uses `Providers\PowerAutomate\*`. Both use the same framework workflows for HTTP, tokens, retries, errors and audit.
 
+### Logic workflows and annotations
+
+There is no Invoke Code in the project. The data handling that sits between the HTTP calls and the form is in `Logic\*.xaml` (24 small workflows, for example `Logic\ResolveBot.xaml`, `Logic\ValidateRequest.xaml`, `Logic\BuildUiPathDetails.xaml`, `Logic\AssetBody.xaml`). They are called with Invoke Workflow File and use only standard activities: Assign, If, For Each, Try Catch, Throw and Invoke Method (for list Add/Remove and File/Directory calls). Short LINQ expressions such as `.Where(...)` and `.FirstOrDefault(...)` appear inside Assign values; they are evaluated immediately.
+
+Every activity in every workflow has an annotation. In Studio, right-click the canvas and choose **Show Annotations** (or click the note icon on an activity) to read it. The annotation on the outer Sequence of each workflow describes the workflow as a whole; the annotation on each step says what that step does, and HTTP Request, Get Credential, Invoke Workflow File and Form activities say which API, asset, workflow or form event they use.
+
 ## 2. The form
 
 `Form\AutomationManagement.uiform`, shown by `Form\Automation_Form_Controller.xaml` with Show Form (Continue workflow execution = On) and a Trigger Scope that reacts to the buttons and selection changes.
@@ -252,7 +258,7 @@ The "Power Automate components" are the provider workflows in `Providers\PowerAu
 | `GET RetrieveCurrentOrganization(...)`, `GET solutions`, `GET solutioncomponents`, `GET workflows` | PA_Get_Solution_Details, PA_Get_Flows | Guide (Microsoft) |
 | `POST ExportSolution`, `POST ImportSolutionAsync`, `GET asyncoperations(<id>)` | PA_Deploy_Solution | Guide (Microsoft) |
 
-Every call above is made by the UiPath **HTTP Request** activity (UiPath.WebAPI.Activities 2.4.0), not by Invoke Code. All REST calls go through `Framework\Send_Http_Request.xaml`, which holds one HTTP Request activity per method: GET, POST, PUT, PATCH, DELETE, multipart upload and download to file. Token requests use the HTTP Request activity in `Framework\Get_Access_Token.xaml`, with Form URL encoded body type. The activity settings used are:
+Every call above is made by the UiPath **HTTP Request** activity (UiPath.WebAPI.Activities 2.4.0), and the project contains no Invoke Code activity at all. All REST calls go through `Framework\Send_Http_Request.xaml`, which holds one HTTP Request activity per method: GET, POST, PUT, PATCH, DELETE, multipart upload and download to file. Token requests use the HTTP Request activity in `Framework\Get_Access_Token.xaml`, with Form URL encoded body type. The activity settings used are:
 
 | Property | Value |
 |---|---|
@@ -288,10 +294,10 @@ All tests ran in a Linux build container with no access to your systems. **None 
 
 | What | How | Result | Evidence |
 |---|---|---|---|
-| XAML load and expression compile | Every XAML loaded with the real UiPath.System.Activities 26.2.7, UiPath.Form.Activities 25.10.0, UiPath.WebAPI.Activities 2.4.0 (HTTP Request), UiPath.Platform 25.10 and UiPath.Workflow assemblies; `ActivityValidationServices` compiled every VB expression. Two Studio-internal assemblies (Activities.Contracts, CodedWorkflows) were empty stubs. | 40 of 40 loaded, 0 errors | `verification/xaml-validation.log` |
+| XAML load and expression compile | Every XAML loaded with the real UiPath.System.Activities 26.2.7, UiPath.Form.Activities 25.10.0, UiPath.WebAPI.Activities 2.4.0 (HTTP Request), UiPath.Platform 25.10 and UiPath.Workflow assemblies; `ActivityValidationServices` compiled every VB expression. Two Studio-internal assemblies (Activities.Contracts, CodedWorkflows) were empty stubs. | 64 of 64 loaded, 0 errors, no Invoke Code | `verification/xaml-validation.log` |
 | .uiform file | Deserialised with UiPath.Studio.Forms.Runtime 25.10.0's form serializer | OK, 129 components, FormId matches the activities | same log |
 | Form behaviour | Chromium with the form.io bundle from UiPath.Studio.Forms.Runtime 25.10.0. Covers section visibility per tool and type, events, field setting, stale details, buttons, grid editing, validation messages and secret masking. | 57 of 57 | `verification/form-browser-tests.log`, screenshots |
-| Workflow logic end to end | The same expressions and Invoke Code bodies compiled as VB.NET (Option Strict On). The HTTP Request activity is emulated from its decompiled 2.4.0 logic: retry handler, continue on error, body types and response handling. Run against a **mock** Orchestrator (Dev/UAT/Prod), Identity Server, Entra ID and Dataverse with fault injection | 93 of 93 | `verification/workflow-tests.log` |
+| Workflow logic end to end | The same activities (Assign, If, For Each, Try Catch, Invoke Method, Invoke Workflow File) and expressions compiled as VB.NET (Option Strict On). The HTTP Request activity is emulated from its decompiled 2.4.0 logic: retry handler, continue on error, body types and response handling. Run against a **mock** Orchestrator (Dev/UAT/Prod), Identity Server, Entra ID and Dataverse with fault injection | 93 of 93 | `verification/workflow-tests.log` |
 
 Workflow test areas:
 
@@ -351,7 +357,7 @@ The XAML files, the form and the VB test twin are generated from one Python mode
 |---|---|
 | `build.py` | Renders the XAML |
 | `build_form.py` | Builds the form |
-| `vb/` | Invoke Code bodies |
+| `vb/` | Source of the `Logic\*.xaml` workflows: one statement per line, turned into Assign, If, For Each, Try Catch, Throw and Invoke Method activities by `vbl.py`. The comment above each line becomes that step's display name and annotation. |
 | `test/run_e2e.sh` | Mock end-to-end suite |
 | `test/test_form.js` | Browser form tests |
 | `validate.sh` | Assembly load and compile check |
